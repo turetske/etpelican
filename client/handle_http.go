@@ -1870,10 +1870,17 @@ func runTransferWorker(ctx context.Context, workChan <-chan *clientTransferFile,
 			}
 			transferResults.JobId = file.jobId
 			transferResults.Scheme = file.file.remoteURL.Scheme
+			// Set Source to the per-file URL. For recursive transfers, file.file.remoteURL
+			// only carries the path; reconstruct the full URL using the job's scheme+host.
+			jobUrl := file.file.job.remoteURL.GetRawUrl()
+			fileURL := *jobUrl
+			fileURL.Path = file.file.remoteURL.Path
+			transferResults.Source = fileURL.String()
 			if err != nil {
 				log.Errorf("Error when attempting to transfer object %s for client %s: %v", file.file.remoteURL, file.uuid.String(), err)
 				transferResults = newTransferResults(file.file.job)
 				transferResults.Scheme = file.file.remoteURL.Scheme
+				transferResults.Source = fileURL.String()
 				transferResults.Error = err
 			}
 			select {

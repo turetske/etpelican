@@ -528,7 +528,14 @@ func runPluginWorker(ctx context.Context, upload bool, workChan <-chan PluginTra
 				log.Errorf("Failed to set TransferProtocol: %s", err)
 			}
 			transfer := jobMap[result.ID()]
-			err = resultAd.Set("TransferUrl", transfer.url.String())
+			// Use the per-file Source URL from the transfer result. For recursive transfers,
+			// this is the individual file's URL rather than the top-level directory URL.
+			// Fall back to the job URL if Source is empty (safety guard).
+			transferUrl := result.Source
+			if transferUrl == "" {
+				transferUrl = transfer.url.String()
+			}
+			err = resultAd.Set("TransferUrl", transferUrl)
 			if err != nil {
 				log.Errorf("Failed to set TransferUrl: %s", err)
 			}
@@ -537,7 +544,7 @@ func runPluginWorker(ctx context.Context, upload bool, workChan <-chan PluginTra
 				if err != nil {
 					log.Errorf("Failed to set TransferType: %s", err)
 				}
-				err = resultAd.Set("TransferFileName", path.Base(transfer.localFile))
+				err = resultAd.Set("TransferFileName", path.Base(transferUrl))
 				if err != nil {
 					log.Errorf("Failed to set TransferFileName: %s", err)
 				}
@@ -546,7 +553,7 @@ func runPluginWorker(ctx context.Context, upload bool, workChan <-chan PluginTra
 				if err != nil {
 					log.Errorf("Failed to set TransferType: %s", err)
 				}
-				err = resultAd.Set("TransferFileName", path.Base(transfer.url.String()))
+				err = resultAd.Set("TransferFileName", path.Base(transferUrl))
 				if err != nil {
 					log.Errorf("Failed to set TransferFileName: %s", err)
 				}

@@ -1140,7 +1140,31 @@ func TestPluginRecursiveDownload(t *testing.T) {
 			}
 		}
 		// Check we get 2 result ads back (each file has been downloaded)
-		assert.Equal(t, 2, len(resultAds))
+		require.Equal(t, 2, len(resultAds))
+
+		// Verify each result ad has a per-file TransferUrl and TransferFileName,
+		// not the top-level recursive directory URL (issue #2697).
+		transferUrls := make([]string, 0, 2)
+		transferFileNames := make([]string, 0, 2)
+		for _, ad := range resultAds {
+			transferUrl, ok := classad.GetAs[string](ad, "TransferUrl")
+			require.True(t, ok, "TransferUrl not set in result ad")
+			transferUrls = append(transferUrls, transferUrl)
+
+			transferFileName, ok := classad.GetAs[string](ad, "TransferFileName")
+			require.True(t, ok, "TransferFileName not set in result ad")
+			transferFileNames = append(transferFileNames, transferFileName)
+
+			// Each TransferUrl must be a specific file URL, not the recursive directory URL
+			require.NotEqual(t, downloadUrl1.String(), transferUrl,
+				"TransferUrl should be per-file, not the top-level recursive URL")
+		}
+		// The two result ads must have different URLs (one per file)
+		require.NotEqual(t, transferUrls[0], transferUrls[1],
+			"Each recursive file transfer should have a unique TransferUrl")
+		// Both filenames should be actual filenames, not the directory name
+		require.ElementsMatch(t, []string{"test.txt", "test2.txt"}, transferFileNames,
+			"TransferFileName should be the individual file names")
 	})
 
 	t.Run("TestRecursiveFailureDirNotFound", func(t *testing.T) {
