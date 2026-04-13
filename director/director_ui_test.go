@@ -468,3 +468,69 @@ func TestGetNamespaces(t *testing.T) {
 		}
 	})
 }
+
+func TestAdvertisementToServerResponse(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+	t.Cleanup(func() {
+		resetHealthTests()
+	})
+
+	testCases := []struct {
+		name string
+		// If non-nil, seed a healthTestUtil entry keyed by the ad's URL before running
+		seedHealthUtil *healthTestUtil
+		ad             server_structs.ServerAd
+		expectedStatus HealthTestStatus
+	}{
+		{
+			name: "disabled-test-origin-returns-health-status-disabled",
+			ad: server_structs.ServerAd{
+				URL:                 url.URL{Host: "origin-s3.example.com", Scheme: "https"},
+				Type:                server_structs.OriginType.String(),
+				DisableDirectorTest: true,
+			},
+			expectedStatus: HealthStatusDisabled,
+		},
+		{
+			name: "enabled-test-server-returns-unknown-without-util",
+			ad: server_structs.ServerAd{
+				URL:                 url.URL{Host: "origin-normal.example.com", Scheme: "https"},
+				Type:                server_structs.OriginType.String(),
+				DisableDirectorTest: false,
+				FromTopology:        true, // suppress the debug log
+			},
+			expectedStatus: HealthStatusUnknown,
+		},
+		{
+			name: "server-with-ok-health-util",
+			seedHealthUtil: &healthTestUtil{
+				Status: HealthStatusOK,
+			},
+			ad: server_structs.ServerAd{
+				URL:  url.URL{Host: "cache-ok.example.com", Scheme: "https"},
+				Type: server_structs.CacheType.String(),
+			},
+			expectedStatus: HealthStatusOK,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetHealthTests()
+
+			if tc.seedHealthUtil != nil {
+				healthTestUtilsMutex.Lock()
+				healthTestUtils[tc.ad.URL.String()] = tc.seedHealthUtil
+				healthTestUtilsMutex.Unlock()
+			}
+
+			tc.ad.Initialize("test-server")
+			ad := &server_structs.Advertisement{
+				ServerAd: tc.ad,
+			}
+
+			res := advertisementToServerResponse(ad)
+			assert.Equal(t, tc.expectedStatus, res.HealthStatus)
+		})
+	}
+}
