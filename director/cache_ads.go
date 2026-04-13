@@ -164,6 +164,14 @@ func populateEWMAStatusWeight(newSAd, oldSAd *server_structs.ServerAd) {
 	var statusWeight float64
 	ioStatus := metrics.ParseHealthStatus(newSAd.Status)
 	xt := getRawStatusWeight(ioStatus)
+
+	// Caches that disable director tests should be deprioritized in sorting
+	// because we cannot verify their health. Origins are exempt because disabling
+	// tests is expected for non-POSIX backends (S3, Globus, etc.).
+	if newSAd.DisableDirectorTest && newSAd.Type == server_structs.CacheType.String() {
+		xt = 0.01
+	}
+
 	t := time.Now()
 
 	// If there is no existing ad, the weight is just the current status

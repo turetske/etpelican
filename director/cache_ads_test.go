@@ -567,6 +567,43 @@ func TestPopulateEWMAStatusWeightSequence(t *testing.T) {
 	}
 }
 
+func TestPopulateEWMAStatusWeightCacheDisabledTest(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+
+	t.Run("cache-with-disabled-tests-gets-low-weight", func(t *testing.T) {
+		newSAd := &server_structs.ServerAd{
+			Status:              metrics.StatusOK.String(),
+			DisableDirectorTest: true,
+			Type:                server_structs.CacheType.String(),
+		}
+		populateEWMAStatusWeight(newSAd, nil)
+		assert.InEpsilon(t, 0.01, newSAd.StatusWeight, 0.001,
+			"Cache with disabled director tests should get low status weight")
+	})
+
+	t.Run("origin-with-disabled-tests-gets-normal-weight", func(t *testing.T) {
+		newSAd := &server_structs.ServerAd{
+			Status:              metrics.StatusOK.String(),
+			DisableDirectorTest: true,
+			Type:                server_structs.OriginType.String(),
+		}
+		populateEWMAStatusWeight(newSAd, nil)
+		assert.InEpsilon(t, 1.0, newSAd.StatusWeight, 0.001,
+			"Origin with disabled director tests should get normal status weight")
+	})
+
+	t.Run("cache-with-enabled-tests-gets-normal-weight", func(t *testing.T) {
+		newSAd := &server_structs.ServerAd{
+			Status:              metrics.StatusOK.String(),
+			DisableDirectorTest: false,
+			Type:                server_structs.CacheType.String(),
+		}
+		populateEWMAStatusWeight(newSAd, nil)
+		assert.InEpsilon(t, 1.0, newSAd.StatusWeight, 0.001,
+			"Cache with enabled director tests and OK status should get normal status weight")
+	})
+}
+
 func TestApplyDowntimeFilters(t *testing.T) {
 	t.Cleanup(test_utils.SetupTestLogging(t))
 
