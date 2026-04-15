@@ -1,9 +1,7 @@
 import serverHasError from '@/helpers/serverHasError';
 import { ServerGeneral } from '@/types';
 
-const makeServer = (
-  overrides: Partial<ServerGeneral> = {}
-): ServerGeneral => ({
+const makeServer = (overrides: Partial<ServerGeneral> = {}): ServerGeneral => ({
   name: 'test-server',
   version: '7.26.0',
   storageType: 'posix',
@@ -38,27 +36,19 @@ describe('serverHasError', () => {
   });
 
   test('returns true when healthStatus is Error', () => {
-    expect(
-      serverHasError(makeServer({ healthStatus: 'Error' }))
-    ).toBe(true);
+    expect(serverHasError(makeServer({ healthStatus: 'Error' }))).toBe(true);
   });
 
   test('returns true when serverStatus is critical', () => {
-    expect(
-      serverHasError(makeServer({ serverStatus: 'critical' }))
-    ).toBe(true);
+    expect(serverHasError(makeServer({ serverStatus: 'critical' }))).toBe(true);
   });
 
   test('returns true when serverStatus is warning', () => {
-    expect(
-      serverHasError(makeServer({ serverStatus: 'warning' }))
-    ).toBe(true);
+    expect(serverHasError(makeServer({ serverStatus: 'warning' }))).toBe(true);
   });
 
   test('returns true when serverStatus is degraded', () => {
-    expect(
-      serverHasError(makeServer({ serverStatus: 'degraded' }))
-    ).toBe(true);
+    expect(serverHasError(makeServer({ serverStatus: 'degraded' }))).toBe(true);
   });
 
   test('returns false for undefined server', () => {
