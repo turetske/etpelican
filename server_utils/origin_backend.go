@@ -103,3 +103,37 @@ func StashPelicanHeaders(r *http.Request) *http.Request {
 	})
 	return r.WithContext(ctx)
 }
+
+// ---------------------------------------------------------------------------
+// RawRequest — escaped-path propagation for passthrough backends
+// ---------------------------------------------------------------------------
+
+// rawRequestKey is the context key for RawRequest.
+type rawRequestKey struct{}
+
+// RawRequest carries details of the original client request that the
+// WebDAV layer erases: the still-percent-encoded path (gin decodes the
+// wildcard param, collapsing encoded separators like %2F) and the HTTP
+// method (the WebDAV FileSystem interface only receives a context, but
+// passthrough backends want to avoid an upstream GET for a HEAD).
+type RawRequest struct {
+	// EscapedPath is the request path relative to the export's route
+	// prefix, with percent-encoding intact.
+	EscapedPath string
+	// Method is the original HTTP method of the client request.
+	Method string
+}
+
+// WithRawRequest stores the given RawRequest in ctx.
+func WithRawRequest(ctx context.Context, r *RawRequest) context.Context {
+	return context.WithValue(ctx, rawRequestKey{}, r)
+}
+
+// RawRequestFromContext retrieves a previously stashed RawRequest (or
+// nil if none was stored).
+func RawRequestFromContext(ctx context.Context) *RawRequest {
+	if r, ok := ctx.Value(rawRequestKey{}).(*RawRequest); ok {
+		return r
+	}
+	return nil
+}

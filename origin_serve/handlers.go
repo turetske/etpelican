@@ -808,6 +808,24 @@ func RegisterHandlers(engine *gin.Engine, directorEnabled bool) error {
 			*modifiedReq = *req
 			modifiedReq.URL = &modifiedURL
 
+			// Stash the still-percent-encoded request path and the HTTP
+			// method for passthrough backends (e.g. ADIOS).  The decoded
+			// path above collapses encoded separators like %2F, silently
+			// changing the meaning of paths whose segments contain
+			// encoded slashes; backends that forward paths verbatim need
+			// the escaped form.  If the escaped path doesn't start with
+			// the route prefix (it always should, since gin matched the
+			// route), leave EscapedPath empty and let the backend fall
+			// back to re-escaping the decoded path.
+			escapedWildcard := ""
+			if ep := c.Request.URL.EscapedPath(); strings.HasPrefix(ep, routePrefix) {
+				escapedWildcard = strings.TrimPrefix(ep, routePrefix)
+			}
+			modifiedReq = modifiedReq.WithContext(server_utils.WithRawRequest(modifiedReq.Context(), &server_utils.RawRequest{
+				EscapedPath: escapedWildcard,
+				Method:      c.Request.Method,
+			}))
+
 			// For PUT requests, pass the Content-Length as a size hint
 			// so the blob backend can optimize upload part sizes.
 			if c.Request.Method == http.MethodPut && c.Request.ContentLength > 0 {
