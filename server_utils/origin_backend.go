@@ -64,6 +64,16 @@ type HTTPStatusCoder interface {
 	HTTPStatusCode() int
 }
 
+// DefaultContentTyper is optionally implemented by backends whose
+// objects all share a fixed content type.  When implemented, the origin
+// sets the Content-Type response header before serving, which also
+// stops http.ServeContent from reading the body to sniff a type — for
+// streaming backends that would cost an upstream GET even on HEAD
+// requests (ADIOS object names carry no file extension).
+type DefaultContentTyper interface {
+	DefaultContentType() string
+}
+
 // ---------------------------------------------------------------------------
 // PelicanHeaders — generic request-metadata propagation
 // ---------------------------------------------------------------------------

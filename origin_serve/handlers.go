@@ -833,6 +833,18 @@ func RegisterHandlers(engine *gin.Engine, directorEnabled bool) error {
 				modifiedReq = modifiedReq.WithContext(ctx)
 			}
 
+			// For backends with a fixed content type, set the header up
+			// front: http.ServeContent otherwise sniffs the type by
+			// reading the body, which for streaming backends costs an
+			// upstream round trip even on HEAD requests.
+			if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+				if dct, ok := backend.(server_utils.DefaultContentTyper); ok {
+					if ct := dct.DefaultContentType(); ct != "" {
+						c.Writer.Header().Set("Content-Type", ct)
+					}
+				}
+			}
+
 			if isTPCRequest(c.Request) {
 				handleCopyTPC(c, backend)
 			} else if c.Request.Method == http.MethodHead {
