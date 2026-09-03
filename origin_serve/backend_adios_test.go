@@ -20,121 +20,301 @@ package origin_serve
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pelicanplatform/pelican/server_utils"
 )
 
-func TestParseAdiosPathValid(t *testing.T) {
-	spec, err := parseAdiosPath("/cfs/www/KSTAR/images.bp/rads/s0n1b0r1")
-	require.NoError(t, err)
-	assert.Equal(t, "cfs/www/KSTAR/images.bp", spec.bpPath)
-	assert.Equal(t, []string{"/rads"}, spec.varnames)
-	assert.Equal(t, 0, spec.step)
-	assert.Equal(t, 1, spec.stepCount)
-	assert.Equal(t, 0, spec.blockID)
-	assert.Equal(t, 1, spec.rmOrder)
-}
-
-func TestParseAdiosPathBatchValid(t *testing.T) {
-	spec, err := parseAdiosPath("/cfs/www/KSTAR/images.bp/rads+te+jsatr/s2n3b4r0")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"/rads", "/te", "/jsatr"}, spec.varnames)
-	assert.Equal(t, 2, spec.step)
-	assert.Equal(t, 3, spec.stepCount)
-	assert.Equal(t, 4, spec.blockID)
-	assert.Equal(t, 0, spec.rmOrder)
-}
-
-func TestParseAdiosPathInvalid(t *testing.T) {
-	_, err := parseAdiosPath("/cfs/www/KSTAR/images.bp/rads/s0n1b0")
-	require.Error(t, err)
-
-	_, err = parseAdiosPath("/cfs/www/KSTAR/notbp/rads/s0n1b0r1")
-	require.Error(t, err)
-
-	_, err = parseAdiosPath("/cfs/www/KSTAR/images.bp/rads/s0n1b0r2")
-	require.Error(t, err)
-}
-
-func TestBuildUpstreamURL(t *testing.T) {
+func TestAdiosUpstreamURL(t *testing.T) {
 	fs := &adiosFileSystem{
-		serviceURL:    "https://example.org/adios",
-		storagePrefix: "/cfs/www",
+		serviceURL:    "https://example.org",
+		storagePrefix: "/adios",
 	}
 
-	singleURL := fs.buildUpstreamURL(adiosRequestSpec{
-		bpPath:    "KSTAR/images.bp",
-		varnames:  []string{"/rads"},
-		step:      0,
-		stepCount: 1,
-		blockID:   0,
-		rmOrder:   1,
-	})
-	assert.Contains(t, singleURL, "?get&")
-	assert.Contains(t, singleURL, "RMOrder=1")
-	assert.Contains(t, singleURL, "Varname=%2Frads")
+	// Paths are forwarded verbatim: no query synthesis, no reordering,
+	// no decoding.
+	u, err := fs.upstreamURL("/cfs/www/KSTAR/images.bp/r1/g~L2pzYXRy~c26o0")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/adios/cfs/www/KSTAR/images.bp/r1/g~L2pzYXRy~c26o0", u)
 
-	batchURL := fs.buildUpstreamURL(adiosRequestSpec{
-		bpPath:    "KSTAR/images.bp",
-		varnames:  []string{"/te", "/rads"},
-		step:      5,
-		stepCount: 2,
-		blockID:   7,
-		rmOrder:   0,
-	})
-	assert.Contains(t, batchURL, "?batchget&")
-	assert.Contains(t, batchURL, "RMOrder=0")
-	assert.Contains(t, batchURL, "NVars=2")
+	// Percent-encoded separators must survive untouched — decoding
+	// %2F would change which variable is requested.
+	u, err = fs.upstreamURL("/savedt.bp/bbb%2Fphi/s0n1b0r1")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/adios/savedt.bp/bbb%2Fphi/s0n1b0r1", u)
+
+	// Characters common in base64-ish ADIOS request segments.
+	u, err = fs.upstreamURL("/f.bp/rads+te+jsatr/aGk9PQ==")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/adios/f.bp/rads+te+jsatr/aGk9PQ==", u)
+
+	// Empty and "." segments are dropped.
+	u, err = fs.upstreamURL("//a/./b")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/adios/a/b", u)
+
+	// Traversal is rejected, in both literal and encoded forms.
+	_, err = fs.upstreamURL("/a/../b")
+	require.Error(t, err)
+	_, err = fs.upstreamURL("/a/%2e%2e/b")
+	require.Error(t, err)
+	_, err = fs.upstreamURL("/a/%2E%2E/b")
+	require.Error(t, err)
+
+	// Empty paths are rejected.
+	_, err = fs.upstreamURL("")
+	require.Error(t, err)
+	_, err = fs.upstreamURL("/")
+	require.Error(t, err)
+
+	// Invalid percent-encoding is rejected rather than forwarded.
+	_, err = fs.upstreamURL("/a/b%zz")
+	require.Error(t, err)
 }
 
-func TestAdiosOpenFileSingle(t *testing.T) {
+func TestAdiosUpstreamURLNoPrefix(t *testing.T) {
+	fs := &adiosFileSystem{serviceURL: "https://example.org"}
+	u, err := fs.upstreamURL("/f.bp/v/s0n1b0r1")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/f.bp/v/s0n1b0r1", u)
+}
+
+func TestAdiosEscapedPath(t *testing.T) {
+	// The raw path stashed by the handler wins over the decoded name.
+	ctx := server_utils.WithRawRequest(context.Background(), &server_utils.RawRequest{
+		EscapedPath: "/f.bp/bbb%2Fphi/s0n1b0r1",
+		Method:      http.MethodGet,
+	})
+	assert.Equal(t, "/f.bp/bbb%2Fphi/s0n1b0r1", adiosEscapedPath(ctx, "/f.bp/bbb/phi/s0n1b0r1"))
+
+	// Without a stashed raw path, the decoded name is re-escaped.
+	assert.Equal(t, "/f.bp/with%20space", adiosEscapedPath(context.Background(), "/f.bp/with space"))
+}
+
+func TestAdiosStatUpstream(t *testing.T) {
+	var status atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "get", r.URL.RawQuery[:3])
-		assert.Equal(t, "1", r.URL.Query().Get("RMOrder"))
-		assert.Equal(t, "/rads", r.URL.Query().Get("Varname"))
+		assert.Equal(t, http.MethodHead, r.Method)
+		code := int(status.Load())
+		if code == http.StatusOK {
+			w.Header().Set("Content-Length", "1234")
+		}
+		w.WriteHeader(code)
+	}))
+	defer srv.Close()
+
+	fs := &adiosFileSystem{
+		serviceURL: srv.URL,
+		httpClient: srv.Client(),
+	}
+
+	status.Store(http.StatusOK)
+	size, _, err := fs.statUpstream(context.Background(), srv.URL+"/f.bp/v/s0n1b0r1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1234), size)
+
+	status.Store(http.StatusNotFound)
+	_, _, err = fs.statUpstream(context.Background(), srv.URL+"/f.bp/v/s0n1b0r1")
+	assert.ErrorIs(t, err, os.ErrNotExist)
+
+	// Servers predating ADIOS PR 5144 refuse HEAD; degrade to size 0
+	// rather than failing.
+	status.Store(http.StatusForbidden)
+	size, _, err = fs.statUpstream(context.Background(), srv.URL+"/f.bp/v/s0n1b0r1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), size)
+
+	status.Store(http.StatusInternalServerError)
+	_, _, err = fs.statUpstream(context.Background(), srv.URL+"/f.bp/v/s0n1b0r1")
+	require.Error(t, err)
+}
+
+func TestAdiosOpenFileGet(t *testing.T) {
+	var gets, heads atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			gets.Add(1)
+		case http.MethodHead:
+			heads.Add(1)
+		}
+		// The upstream must see the path byte-for-byte, encoding intact.
+		assert.Equal(t, "/adios/f.bp/bbb%2Fphi/s0n1b0r1", r.URL.EscapedPath())
+		assert.Empty(t, r.URL.RawQuery)
 		_, _ = w.Write([]byte("payload"))
 	}))
 	defer srv.Close()
 
 	backend := newAdiosBackend(AdiosBackendOptions{
 		ServiceURL:    srv.URL,
-		StoragePrefix: "/cfs/www",
+		StoragePrefix: "/adios",
 	})
 
-	f, err := backend.fs.OpenFile(context.Background(), "/KSTAR/images.bp/rads/s0n1b0r1", os.O_RDONLY, 0)
+	ctx := server_utils.WithRawRequest(context.Background(), &server_utils.RawRequest{
+		EscapedPath: "/f.bp/bbb%2Fphi/s0n1b0r1",
+		Method:      http.MethodGet,
+	})
+	f, err := backend.fs.OpenFile(ctx, "/f.bp/bbb/phi/s0n1b0r1", os.O_RDONLY, 0)
 	require.NoError(t, err)
 	defer f.Close()
+
+	// A GET-serving open sizes the object from the eager response — no
+	// upstream HEAD.
+	fi, err := f.Stat()
+	require.NoError(t, err)
+	assert.Equal(t, int64(len("payload")), fi.Size())
 
 	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(data))
+
+	assert.Equal(t, int64(1), gets.Load())
+	assert.Equal(t, int64(0), heads.Load())
 }
 
-func TestAdiosOpenFileBatch(t *testing.T) {
+func TestAdiosOpenFileHead(t *testing.T) {
+	var gets, heads atomic.Int64
+	payload := []byte("head-then-get")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "batchget", r.URL.RawQuery[:8])
-		assert.Equal(t, "0", r.URL.Query().Get("RMOrder"))
-		assert.Equal(t, "3", r.URL.Query().Get("NVars"))
-		_, _ = w.Write([]byte("batch"))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		switch r.Method {
+		case http.MethodHead:
+			heads.Add(1)
+		case http.MethodGet:
+			gets.Add(1)
+			_, _ = w.Write(payload)
+		}
 	}))
 	defer srv.Close()
 
 	backend := newAdiosBackend(AdiosBackendOptions{
 		ServiceURL:    srv.URL,
-		StoragePrefix: "/cfs/www",
+		StoragePrefix: "/adios",
 	})
 
-	f, err := backend.fs.OpenFile(context.Background(), "/KSTAR/images.bp/rads+te+jsatr/s1n2b3r0", os.O_RDONLY, 0)
+	ctx := server_utils.WithRawRequest(context.Background(), &server_utils.RawRequest{
+		EscapedPath: "/f.bp/v/s0n1b0r1",
+		Method:      http.MethodHead,
+	})
+	f, err := backend.fs.OpenFile(ctx, "/f.bp/v/s0n1b0r1", os.O_RDONLY, 0)
 	require.NoError(t, err)
 	defer f.Close()
 
+	// A HEAD-serving open must not trigger an upstream GET: sizing comes
+	// from HEAD, and ServeContent's End/Start seeks are arithmetic.
+	fi, err := f.Stat()
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload)), fi.Size())
+
+	end, err := f.Seek(0, io.SeekEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload)), end)
+	_, err = f.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), heads.Load())
+	assert.Equal(t, int64(0), gets.Load())
+
+	// Reading lazily issues the GET.
 	data, err := io.ReadAll(f)
 	require.NoError(t, err)
-	assert.Equal(t, "batch", string(data))
+	assert.Equal(t, payload, data)
+	assert.Equal(t, int64(1), gets.Load())
+}
+
+func TestAdiosStreamSeek(t *testing.T) {
+	var gets atomic.Int64
+	payload := []byte("0123456789")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	backend := newAdiosBackend(AdiosBackendOptions{
+		ServiceURL:    srv.URL,
+		StoragePrefix: "/adios",
+	})
+
+	f, err := backend.fs.OpenFile(context.Background(), "/f.bp/v/s0n1b0r1", os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// The http.ServeContent pattern: Seek(End) to size, Seek(Start),
+	// then sequential reads — served by the single eager GET.
+	end, err := f.Seek(0, io.SeekEnd)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload)), end)
+	_, err = f.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, payload, data)
+	assert.Equal(t, int64(1), gets.Load())
+
+	// A backward seek forces a re-fetch that discards up to the offset.
+	_, err = f.Seek(4, io.SeekStart)
+	require.NoError(t, err)
+	data, err = io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, payload[4:], data)
+	assert.Equal(t, int64(2), gets.Load())
+}
+
+func TestAdiosOpenFileNoContentLength(t *testing.T) {
+	payload := []byte("chunked-payload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Force a chunked response so ContentLength is unknown.
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	backend := newAdiosBackend(AdiosBackendOptions{
+		ServiceURL:    srv.URL,
+		StoragePrefix: "/adios",
+	})
+
+	f, err := backend.fs.OpenFile(context.Background(), "/f.bp/v/s0n1b0r1", os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// Without a Content-Length the backend buffers to learn the size.
+	fi, err := f.Stat()
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload)), fi.Size())
+
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, payload, data)
+}
+
+func TestAdiosCheckAvailabilityMemoized(t *testing.T) {
+	var probes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodHead, r.Method)
+		probes.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	backend := newAdiosBackend(AdiosBackendOptions{ServiceURL: srv.URL})
+
+	require.NoError(t, backend.CheckAvailability())
+	require.NoError(t, backend.CheckAvailability())
+	require.NoError(t, backend.CheckAvailability())
+	assert.Equal(t, int64(1), probes.Load(), "availability probes should be memoized")
 }
