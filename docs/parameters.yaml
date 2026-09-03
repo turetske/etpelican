@@ -1525,10 +1525,12 @@ components: ["origin"]
 name: Origin.AdiosServiceUrl
 description: |+
   If Origin.StorageType is set to `adios`, the service URL is used as the base for requests to the backend.
-  The origin appends `Origin.StoragePrefix` and the requested `.bp` path before issuing ADIOS `get` or
-  `batchget` query operations.
+  The origin acts as a straight passthrough: it strips the export's FederationPrefix, prepends the export's
+  StoragePrefix, and forwards the remainder of the request path to this URL verbatim.
 
-  This URL should include the ADIOS route prefix, for example: `https://example.org:443/adios`.
+  This URL must be the bare service root, without the ADIOS route prefix — for example
+  `https://example.org:443`.  The route prefix (e.g. `/adios`) is configured as the export's
+  StoragePrefix, which the ADIOS server uses to recognize ADIOS Get requests.
 type: string
 default: none
 components: ["origin"]
