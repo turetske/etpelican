@@ -81,6 +81,52 @@ func TestAdiosUpstreamURL(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAdiosUpstreamURLAdminRoot(t *testing.T) {
+	fs := &adiosFileSystem{serviceURL: "https://example.org"}
+
+	// A leading "_adios" segment addresses the ADIOS server's admin
+	// commands (stats, files, flush, limits), which are unauthenticated
+	// upstream.  It must never be forwarded, in any spelling.
+	for _, p := range []string{
+		"/_adios/flush",
+		"/_adios/stats",
+		"/_adios",
+		"//_adios/limits", // empty leading segment is dropped first
+		"/./_adios/flush", // "." segment is dropped first
+		"/%5Fadios/flush", // percent-encoded underscore
+	} {
+		_, err := fs.upstreamURL(p)
+		require.Error(t, err, p)
+		assert.Contains(t, err.Error(), "admin", p)
+	}
+
+	// An encoded slash makes "_adios/flush" a single segment — a dataset
+	// name as far as the server is concerned, not the admin root.  It is
+	// forwarded verbatim (the server 404s it), not blocked.
+	u, err := fs.upstreamURL("/_adios%2Fflush")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.org/_adios%2Fflush", u)
+
+	// The marker is legitimate anywhere *after* a dataset path — that is
+	// how every current client addresses data — including when the
+	// dataset itself is a single segment.
+	for _, p := range []string{
+		"/cfs/www/KSTAR24.tar/_adios/v1r1pAAAA/b~2~L2JiYi9uZw~c66,26,1o0,0,0~L2JiYi90ZQ~c66,26o0,0",
+		"/images.bp/_adios/v1r1/g~L2pzYXRy~c26o0",
+		"/f.bp/_adios/stats", // looks like a command but is a data request for f.bp
+	} {
+		u, err := fs.upstreamURL(p)
+		require.NoError(t, err, p)
+		assert.Equal(t, "https://example.org"+p, u)
+	}
+
+	// With a StoragePrefix the forwarded path can never start with
+	// "_adios" anyway, but the client-facing rule is the same.
+	fs.storagePrefix = "/adios"
+	_, err = fs.upstreamURL("/_adios/flush")
+	require.Error(t, err)
+}
+
 func TestAdiosUpstreamURLNoPrefix(t *testing.T) {
 	fs := &adiosFileSystem{serviceURL: "https://example.org"}
 	u, err := fs.upstreamURL("/f.bp/v/s0n1b0r1")

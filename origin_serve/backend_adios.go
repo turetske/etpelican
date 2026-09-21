@@ -19,11 +19,18 @@
 // The ADIOS backend is a straight passthrough to an upstream ADIOS
 // service.  The origin does not understand the ADIOS request grammar:
 // it strips the export's FederationPrefix (done by the handler layer),
-// prepends the export's StoragePrefix (the ADIOS route prefix, e.g.
-// "/adios"), and forwards the remainder of the path verbatim —
-// percent-encoding included.  ADIOS encodes everything it needs
-// (variable names, step/block selectors, file configs) in the path, so
-// any rewriting here would silently change request semantics.
+// prepends the export's StoragePrefix, and forwards the remainder of
+// the path verbatim — percent-encoding included.  ADIOS encodes
+// everything it needs (variable names, step/block selectors, file
+// configs) in the path, so any rewriting here would silently change
+// request semantics.
+//
+// Current ADIOS clients emit <serverpath><file>/_adios/<config>/<request>
+// and the server routes on that infix "_adios" marker, so StoragePrefix
+// is normally "/" (no prefix); anything prepended becomes part of the
+// dataset path upstream.  The one thing the backend does refuse is a
+// path whose *first* segment is "_adios": that is the server's
+// unauthenticated admin root, not data.
 package origin_serve
 
 import (
@@ -54,6 +61,11 @@ const (
 	// How long a failed probe is trusted; kept short so a recovered
 	// upstream is noticed quickly.
 	adiosAvailabilityFailTTL = 5 * time.Second
+
+	// adiosAdminSegment is the reserved path segment the ADIOS server
+	// uses both as the data-request marker (after a dataset path) and,
+	// when it is the first segment, as the root of its admin commands.
+	adiosAdminSegment = "_adios"
 )
 
 type adiosBackend struct {
@@ -264,6 +276,14 @@ func (fs *adiosFileSystem) upstreamURL(escapedPath string) (string, error) {
 			return "", fmt.Errorf("invalid percent-encoding in adios path segment %q: %w", seg, err)
 		} else if decoded == ".." || decoded == "." {
 			return "", fmt.Errorf("path traversal in adios path %q", escapedPath)
+		} else if len(segments) == 0 && decoded == adiosAdminSegment {
+			// The ADIOS server's admin commands (stats, files, flush,
+			// limits) live at /_adios/<command> — the reserved marker
+			// as the *first* segment.  Data requests carry the marker
+			// only after a dataset path, so a leading one can never be
+			// a legitimate read; refuse it rather than expose cache
+			// flushes to anyone who can read the namespace.
+			return "", fmt.Errorf("adios admin endpoint %q is not exposed", escapedPath)
 		}
 		segments = append(segments, seg)
 	}

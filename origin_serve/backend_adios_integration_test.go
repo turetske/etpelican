@@ -177,6 +177,41 @@ func TestAdiosHandlerEncodedTraversal(t *testing.T) {
 	assert.Empty(t, rec.recorded(), "upstream must not be contacted for traversal paths")
 }
 
+// TestAdiosHandlerAdminRoot verifies that the ADIOS server's admin
+// commands — /_adios/<command>, unauthenticated upstream — cannot be
+// reached through the namespace, while the same marker after a dataset
+// path (how every current client addresses data) passes through.
+func TestAdiosHandlerAdminRoot(t *testing.T) {
+	rec := &adiosUpstreamRecorder{payload: []byte(`{"requests": 1}`)}
+	upstream := httptest.NewServer(rec.handler())
+	defer upstream.Close()
+
+	engine := setupAdiosHandlerTest(t, upstream.URL)
+	rec.reset() // drop anything from registration-time probes
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, p := range []string{
+			"/fdp-itb/adios/_adios/flush",
+			"/fdp-itb/adios/_adios/stats",
+			"/fdp-itb/adios//_adios/limits",
+			"/fdp-itb/adios/%5Fadios/flush",
+		} {
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequest(method, p, nil))
+			assert.Equal(t, http.StatusNotFound, w.Code, "%s %s", method, p)
+		}
+	}
+	assert.Empty(t, rec.recorded(), "upstream must not be contacted for admin paths")
+
+	// Data request: marker after the dataset path is forwarded verbatim.
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/fdp-itb/adios/images.bp/_adios/v1r1/g~L2pzYXRy~c26o0", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	require.NotEmpty(t, rec.recorded())
+	assert.Contains(t, rec.recorded()[0], "/images.bp/_adios/v1r1/g~L2pzYXRy~c26o0")
+}
+
 // TestAdiosHandlerRepeatedGetStableETag verifies that two GETs for the
 // same object return the same ETag, so downstream caches can
 // revalidate.  (A time.Now()-derived mtime would change per request.)
