@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -277,6 +279,128 @@ func TestAdiosOpenFileHead(t *testing.T) {
 	assert.Equal(t, int64(1), gets.Load())
 }
 
+// rangeServer serves payload, honoring `Range: bytes=N-` with a 206, and
+// records every Range header it receives ("" when absent) plus the
+// number of body bytes it actually sent per request.
+type rangeServer struct {
+	mu      sync.Mutex
+	payload []byte
+	ranges  []string
+	methods []string
+	sent    []int
+}
+
+func (rs *rangeServer) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rs.mu.Lock()
+		rs.methods = append(rs.methods, r.Method)
+		rs.ranges = append(rs.ranges, r.Header.Get("Range"))
+		rs.mu.Unlock()
+
+		start := 0
+		status := http.StatusOK
+		if h := r.Header.Get("Range"); h != "" {
+			fmt.Sscanf(h, "bytes=%d-", &start)
+			status = http.StatusPartialContent
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(rs.payload)-1, len(rs.payload)))
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(rs.payload)-start))
+		w.WriteHeader(status)
+		n := 0
+		if r.Method != http.MethodHead {
+			n, _ = w.Write(rs.payload[start:])
+		}
+		rs.mu.Lock()
+		rs.sent = append(rs.sent, n)
+		rs.mu.Unlock()
+	}
+}
+
+// TestAdiosStreamRangeHonored verifies that a re-positioned read asks
+// upstream for `Range: bytes=<offset>-` and serves the 206 directly,
+// rather than fetching from byte 0 and discarding.
+func TestAdiosStreamRangeHonored(t *testing.T) {
+	rs := &rangeServer{payload: []byte("0123456789")}
+	srv := httptest.NewServer(rs.handler())
+	defer srv.Close()
+
+	backend := newAdiosBackend(AdiosBackendOptions{ServiceURL: srv.URL})
+	f, err := backend.fs.OpenFile(context.Background(), "/f.bp/_adios/v1r1/g~x~c10o0", os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// Backward seek after the eager whole-object GET.
+	_, err = f.Seek(4, io.SeekStart)
+	require.NoError(t, err)
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("456789"), data)
+
+	assert.Equal(t, []string{"", "bytes=4-"}, rs.ranges, "second GET must carry the offset as a Range")
+	assert.Equal(t, []int{10, 6}, rs.sent, "upstream must send only the tail on the ranged GET")
+
+	// Size stays that of the whole object, not of the partial body.
+	fi, err := f.Stat()
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), fi.Size())
+}
+
+// TestAdiosOpenFileRangedGet verifies that a client GET carrying a
+// Range header does not open an eager upstream GET from byte 0: the
+// object is sized with HEAD and the single GET goes out at the
+// requested offset.  This is the 55 GB tar-member case from ADIOS PR
+// 5176 — an abandoned GET from 0 there is a real download upstream.
+func TestAdiosOpenFileRangedGet(t *testing.T) {
+	rs := &rangeServer{payload: []byte("0123456789")}
+	srv := httptest.NewServer(rs.handler())
+	defer srv.Close()
+
+	backend := newAdiosBackend(AdiosBackendOptions{ServiceURL: srv.URL})
+	ctx := server_utils.WithRawRequest(context.Background(), &server_utils.RawRequest{
+		EscapedPath: "/cfs/www/KSTAR24.tar",
+		Method:      http.MethodGet,
+		Range:       "bytes=4-7",
+	})
+	f, err := backend.fs.OpenFile(ctx, "/cfs/www/KSTAR24.tar", os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	assert.Equal(t, []string{http.MethodHead}, rs.methods, "open must size with HEAD only")
+
+	// http.ServeContent's pattern for a range: seek to the start, read
+	// the requested length.
+	_, err = f.Seek(4, io.SeekStart)
+	require.NoError(t, err)
+	buf := make([]byte, 4)
+	_, err = io.ReadFull(f, buf)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("4567"), buf)
+
+	assert.Equal(t, []string{http.MethodHead, http.MethodGet}, rs.methods)
+	assert.Equal(t, []string{"", "bytes=4-"}, rs.ranges, "the only GET starts at the range offset")
+	assert.Equal(t, []int{0, 6}, rs.sent, "nothing is fetched from byte 0")
+}
+
+func TestParseContentRange(t *testing.T) {
+	first, total, ok := parseContentRange("bytes 4-9/10")
+	require.True(t, ok)
+	assert.Equal(t, int64(4), first)
+	assert.Equal(t, int64(10), total)
+
+	first, total, ok = parseContentRange("bytes 100-199/*")
+	require.True(t, ok)
+	assert.Equal(t, int64(100), first)
+	assert.Equal(t, int64(-1), total)
+
+	for _, bad := range []string{"", "bytes */10", "items 0-1/2", "bytes 0-1"} {
+		_, _, ok = parseContentRange(bad)
+		assert.False(t, ok, bad)
+	}
+}
+
+// TestAdiosStreamSeek covers the fallback: an upstream that ignores the
+// Range header and answers 200 from byte 0 still yields the right bytes
+// (the leading offset is discarded).
 func TestAdiosStreamSeek(t *testing.T) {
 	var gets atomic.Int64
 	payload := []byte("0123456789")

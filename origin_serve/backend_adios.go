@@ -42,6 +42,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -174,18 +175,28 @@ func (fs *adiosFileSystem) OpenFile(ctx context.Context, name string, flag int, 
 		mod:  time.Unix(0, 0),
 	}
 
-	// For a GET, fetch eagerly so the data arrives in a single upstream
-	// round trip and the response's Content-Length sizes the object.
-	// For anything else (HEAD in particular — the WebDAV layer serves
-	// both through the same code path), size the object with an
-	// upstream HEAD and only issue the GET if a byte is actually read;
-	// ADIOS requests are computed server-side, so a discarded GET body
-	// is real wasted work upstream.
+	// For a whole-object GET, fetch eagerly so the data arrives in a
+	// single upstream round trip and the response's Content-Length sizes
+	// the object.  For anything else, size the object with an upstream
+	// HEAD and only issue a GET when a byte is actually read:
+	//   - HEAD (the WebDAV layer serves both through this code path):
+	//     ADIOS requests are computed server-side, so a discarded GET
+	//     body is real wasted work upstream.
+	//   - a ranged GET (plain files and tar members are read this way
+	//     since ADIOS PR 5176): http.ServeContent seeks to the range
+	//     start before reading, so an eager GET from byte 0 would be
+	//     abandoned immediately — on a 55 GB tar, after the server had
+	//     already started streaming it.  Let the first Read issue one
+	//     upstream GET with the right Range instead.
 	method := http.MethodGet
-	if rr := server_utils.RawRequestFromContext(ctx); rr != nil && rr.Method != "" {
-		method = rr.Method
+	ranged := false
+	if rr := server_utils.RawRequestFromContext(ctx); rr != nil {
+		if rr.Method != "" {
+			method = rr.Method
+		}
+		ranged = rr.Range != ""
 	}
-	if method == http.MethodGet {
+	if method == http.MethodGet && !ranged {
 		if err := f.fetch(0); err != nil {
 			return nil, err
 		}
@@ -370,8 +381,9 @@ func (fi *adiosFileInfo) Sys() interface{} { return nil }
 // response instead of buffering it.  Seeks are arithmetic on a logical
 // position (http.ServeContent seeks End→Start to size the content
 // before reading); the underlying stream is reconciled lazily on Read —
-// by discarding for forward gaps, or re-issuing the upstream request
-// for backward ones.
+// by discarding for forward gaps within the current response, or by
+// re-issuing the upstream request with a Range header at the new
+// offset.
 type adiosStreamFile struct {
 	fs   *adiosFileSystem
 	ctx  context.Context
@@ -388,14 +400,21 @@ type adiosStreamFile struct {
 }
 
 // fetch (re-)issues the upstream GET and positions the stream at
-// offset.  On the first fetch the response sizes the object: from
-// Content-Length when present, otherwise by buffering the whole body.
+// offset.  For offset > 0 the request carries `Range: bytes=<offset>-`
+// and a 206 is served from its first byte; a server that ignores the
+// range answers 200 from byte 0, and the leading offset bytes are
+// discarded instead.  On the first fetch the response sizes the object:
+// from Content-Range or Content-Length when present, otherwise by
+// buffering the whole body.
 func (f *adiosStreamFile) fetch(offset int64) error {
 	f.closeBody()
 
 	req, err := f.fs.newUpstreamRequest(f.ctx, http.MethodGet, f.url)
 	if err != nil {
 		return err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 	resp, err := f.fs.httpClient.Do(req)
 	if err != nil {
@@ -413,6 +432,25 @@ func (f *adiosStreamFile) fetch(offset int64) error {
 	}
 
 	body := resp.Body
+	skip := offset
+	firstFetch := !f.sized
+	if resp.StatusCode == http.StatusPartialContent {
+		// The server honored the range: the body starts at offset.
+		cr := resp.Header.Get("Content-Range")
+		start, total, ok := parseContentRange(cr)
+		if !ok || start != offset {
+			body.Close()
+			return fmt.Errorf("adios upstream answered 206 with unusable Content-Range %q for offset %d", cr, offset)
+		}
+		skip = 0
+		if !f.sized {
+			if total < 0 {
+				body.Close()
+				return fmt.Errorf("adios upstream answered 206 without a total size (Content-Range %q)", cr)
+			}
+			f.size, f.sized = total, true
+		}
+	}
 	if !f.sized {
 		if resp.ContentLength >= 0 {
 			f.size = resp.ContentLength
@@ -427,13 +465,15 @@ func (f *adiosStreamFile) fetch(offset int64) error {
 			body = io.NopCloser(bytes.NewReader(payload))
 		}
 		f.sized = true
+	}
+	if firstFetch {
 		if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
 			f.mod = lm
 		}
 	}
 
-	if offset > 0 {
-		if _, err := io.CopyN(io.Discard, body, offset); err != nil {
+	if skip > 0 {
+		if _, err := io.CopyN(io.Discard, body, skip); err != nil {
 			body.Close()
 			return fmt.Errorf("failed to skip to offset %d in adios response: %w", offset, err)
 		}
@@ -441,6 +481,24 @@ func (f *adiosStreamFile) fetch(offset int64) error {
 	f.body = body
 	f.bodyPos = offset
 	return nil
+}
+
+// parseContentRange parses a `bytes <first>-<last>/<total>` header.
+// total is -1 when the server reports it as "*".
+func parseContentRange(h string) (first, total int64, ok bool) {
+	var last int64
+	var totalStr string
+	if _, err := fmt.Sscanf(h, "bytes %d-%d/%s", &first, &last, &totalStr); err != nil {
+		return 0, 0, false
+	}
+	if totalStr == "*" {
+		return first, -1, true
+	}
+	t, err := strconv.ParseInt(totalStr, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return first, t, true
 }
 
 func (f *adiosStreamFile) closeBody() {

@@ -41,22 +41,39 @@ import (
 type adiosUpstreamRecorder struct {
 	mu       sync.Mutex
 	requests []string // "METHOD escaped-path"
+	ranges   []string // Range header per recorded request ("" if none)
 	payload  []byte
 }
 
+// handler serves payload, honoring `Range: bytes=N-` with a 206 the way
+// the real ADIOS server does for plain files (PR 5176).
 func (rec *adiosUpstreamRecorder) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			rec.mu.Lock()
 			rec.requests = append(rec.requests, r.Method+" "+r.URL.EscapedPath())
+			rec.ranges = append(rec.ranges, r.Header.Get("Range"))
 			rec.mu.Unlock()
 		}
-		w.Header().Set("Content-Length", strconv.Itoa(len(rec.payload)))
-		w.WriteHeader(http.StatusOK)
+		start := 0
+		status := http.StatusOK
+		if h := r.Header.Get("Range"); h != "" && r.Method == http.MethodGet {
+			fmt.Sscanf(h, "bytes=%d-", &start)
+			status = http.StatusPartialContent
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(rec.payload)-1, len(rec.payload)))
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(rec.payload)-start))
+		w.WriteHeader(status)
 		if r.Method != http.MethodHead {
-			_, _ = w.Write(rec.payload)
+			_, _ = w.Write(rec.payload[start:])
 		}
 	}
+}
+
+func (rec *adiosUpstreamRecorder) recordedRanges() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]string(nil), rec.ranges...)
 }
 
 func (rec *adiosUpstreamRecorder) recorded() []string {
@@ -69,6 +86,7 @@ func (rec *adiosUpstreamRecorder) reset() {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.requests = nil
+	rec.ranges = nil
 }
 
 // setupAdiosHandlerTest wires the real RegisterHandlers/handleRequest
@@ -210,6 +228,32 @@ func TestAdiosHandlerAdminRoot(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	require.NotEmpty(t, rec.recorded())
 	assert.Contains(t, rec.recorded()[0], "/images.bp/_adios/v1r1/g~L2pzYXRy~c26o0")
+}
+
+// TestAdiosHandlerRangeRequest verifies a client Range GET through the
+// full stack: 206 with the right slice, sized by one upstream HEAD, and
+// exactly one upstream GET that starts at the range offset — never a
+// GET from byte 0 (the tar-member case from ADIOS PR 5176).
+func TestAdiosHandlerRangeRequest(t *testing.T) {
+	rec := &adiosUpstreamRecorder{payload: []byte("0123456789")}
+	upstream := httptest.NewServer(rec.handler())
+	defer upstream.Close()
+
+	engine := setupAdiosHandlerTest(t, upstream.URL)
+	rec.reset() // drop anything from registration-time probes
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/fdp-itb/adios/cfs/www/KSTAR24.tar", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusPartialContent, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "2345", w.Body.String())
+	assert.Equal(t, "bytes 2-5/10", w.Header().Get("Content-Range"))
+
+	// (The test harness exports with StoragePrefix "/adios".)
+	assert.Equal(t, []string{"HEAD /adios/cfs/www/KSTAR24.tar", "GET /adios/cfs/www/KSTAR24.tar"}, rec.recorded())
+	assert.Equal(t, []string{"", "bytes=2-"}, rec.recordedRanges(), "the upstream GET must start at the client's offset")
 }
 
 // TestAdiosHandlerRepeatedGetStableETag verifies that two GETs for the

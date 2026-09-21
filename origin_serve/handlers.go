@@ -824,6 +824,7 @@ func RegisterHandlers(engine *gin.Engine, directorEnabled bool) error {
 			modifiedReq = modifiedReq.WithContext(server_utils.WithRawRequest(modifiedReq.Context(), &server_utils.RawRequest{
 				EscapedPath: escapedWildcard,
 				Method:      c.Request.Method,
+				Range:       c.Request.Header.Get("Range"),
 			}))
 
 			// For PUT requests, pass the Content-Length as a size hint

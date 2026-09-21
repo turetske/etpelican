@@ -132,6 +132,10 @@ type RawRequest struct {
 	EscapedPath string
 	// Method is the original HTTP method of the client request.
 	Method string
+	// Range is the client's Range header, if any.  Passthrough backends
+	// use it to avoid opening a full upstream GET for a request that
+	// will only read a slice of the object.
+	Range string
 }
 
 // WithRawRequest stores the given RawRequest in ctx.
