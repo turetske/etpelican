@@ -1528,9 +1528,18 @@ description: |+
   The origin acts as a straight passthrough: it strips the export's FederationPrefix, prepends the export's
   StoragePrefix, and forwards the remainder of the request path to this URL verbatim.
 
-  This URL must be the bare service root, without the ADIOS route prefix — for example
-  `https://example.org:443`.  The route prefix (e.g. `/adios`) is configured as the export's
-  StoragePrefix, which the ADIOS server uses to recognize ADIOS Get requests.
+  This URL must be the bare service root — for example `https://example.org:443`.
+
+  Current ADIOS clients (ADIOS ≥ 2.12, PR 5176) address data as
+  `<serverpath><file>/_adios/<file-config>/<request>`: the ADIOS server routes on the reserved
+  `_adios` segment *after* the dataset path, and treats everything before the dataset path as part
+  of the file name.  The export's StoragePrefix should therefore be `/` (nothing prepended); the
+  client's `serverpath` setting carries the federation namespace, which the origin strips as the
+  FederationPrefix.  Any other StoragePrefix becomes part of the upstream file path and the ADIOS
+  server will report that nothing exists at that location.
+
+  The origin refuses requests whose first path segment (after the FederationPrefix) is `_adios`:
+  that is the ADIOS server's unauthenticated admin root, not data.
 type: string
 default: none
 components: ["origin"]
