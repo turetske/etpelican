@@ -298,11 +298,15 @@ func makeCollectionAPIRequest(ctx context.Context, method, endpoint string, body
 		return nil, errors.Wrap(err, "failed to construct API URL")
 	}
 
-	// Build scope string - include collection ID if provided
-	// Format: "collection.read:collection_id" for ACL checking in OA4MP proxy
+	// Build the scope string in the path form the embedded issuer mints and
+	// its client-scope filter accepts: "collection.read:/" for the blanket
+	// capability (list, create) and "collection.read:/<id>" for one
+	// collection. A bare "collection.read" or an ID without the leading
+	// slash is never granted — the issuer matches scope suffixes as paths
+	// rooted at "/".
 	scopeStr := string(scope)
-	if collectionID != "" && strings.HasPrefix(scopeStr, "collection.") {
-		scopeStr = scopeStr + ":" + collectionID
+	if strings.HasPrefix(scopeStr, "collection.") {
+		scopeStr = scopeStr + ":/" + collectionID
 	}
 
 	// Collection operations are control-plane: the origin's collections API is
