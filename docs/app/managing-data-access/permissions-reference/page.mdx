@@ -181,7 +181,7 @@ A role on a collection maps to capabilities as follows.
 
 | Action | System / collection admin | Collection owner | Admin-group member | Group with `write` | Group with `read` | Ordinary user |
 |---|---|---|---|---|---|---|
-| Create a collection | yes | — | — | — | — | no (`403`), unless presenting a bearer token whose scope claim carries the bare `collection.create` scope — see below |
+| Create a collection | yes | — | — | — | — | no (`403`) |
 | See a collection in the listing | all | own | yes | yes | yes | public collections only |
 | Read one collection | any | yes | yes | yes | yes | public only |
 | Edit name, description, visibility, sharing | yes | yes | yes | yes | no | no |
@@ -196,10 +196,8 @@ A role on a collection maps to capabilities as follows.
 | List candidate owners | yes | yes | yes | yes | yes | public collections only |
 
 <Callout type="info">
-The bearer-token exception to the `server.collection_admin` requirement is narrower than it looks.
-The handler matches the scope string exactly, so only a token whose scope claim reads `collection.create` qualifies.
-The origin's issuer mints `collection.create:/` (with a path) for every signed-in user, which does not match, and it grants nothing at all when a client asks for the bare form; API tokens can carry the bare form but only a system administrator can mint them.
-So in practice creation stays with collection administrators, on the command line as well as in the web interface.
+Creating a collection is decided by the caller's role, on the command line as well as in the web interface: the handler checks `server.collection_admin` for every caller, and the origin's issuer mints `collection.create:/` only to collection administrators.
+Collection scopes use a path suffix like `storage.*` does: `collection.read:/` is the blanket capability every signed-in user holds, and `collection.modify:/<id>` names one collection.
 </Callout>
 
 <Callout type="warning">

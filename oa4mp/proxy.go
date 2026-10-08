@@ -354,9 +354,13 @@ func GetUserCollectionScopes(db *gorm.DB, user, userID string, groupsList []stri
 	scopes = make([]string, 0)
 	matchedGroupSet := make(map[string]struct{})
 
-	// Any authenticated user can create new collections - they become the owner.
-	// This is a capability scope, not tied to an existing resource.
-	scopes = append(scopes, token_scopes.Collection_Create.String()+":/")
+	// collection.create is a collection-admin capability. Resolve through
+	// this function's db handle, not the global, so DB-granted admins are
+	// seen too.
+	identity := web_ui.UserIdentity{Username: user, ID: userID, Groups: groupsList}
+	if web_ui.HasScopeWithDB(db, identity, token_scopes.Server_CollectionAdmin) {
+		scopes = append(scopes, token_scopes.Collection_Create.String()+":/")
+	}
 
 	// Any authenticated user can list/read collections - the actual access control
 	// is handled at the database level based on ACLs and visibility.
